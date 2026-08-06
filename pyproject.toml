@@ -1,7 +1,7 @@
 [project]
 name = "redump-tools-workflow"
 version = "0.1.0"
-description = "Manifest-driven Redump extraction and conversion workflows"
+description = "Manifest-driven CHD extraction, conversion, verification, and asset update workflows"
 requires-python = ">=3.11"
 
 [build-system]
