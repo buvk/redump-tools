@@ -94,4 +94,3 @@ Manifests now use a payload-only shape:
 }
 ```
 
-Legacy manifest shapes are no longer supported. Existing manifests must use the schema above.
