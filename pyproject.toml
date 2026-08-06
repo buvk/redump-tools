@@ -1,0 +1,9 @@
+[project]
+name = "redump-tools-workflow"
+version = "0.1.0"
+description = "Manifest-driven Redump extraction and conversion workflows"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
