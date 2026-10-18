@@ -16,6 +16,7 @@ It follows a manifest-first strategy, then DAT-assisted heuristics, then brute-f
 - `redump_engine/workflow_extract.py`: extraction decision tree and cleanup
 - `redump_engine/workflow_convert.py`: conversion, manifest creation, m3u generation, cleanup
 - `redump_engine/filenames.py`: DAT naming helpers and disc parsing
+- `redump_engine/cue.py`: shared cue parsing (referenced BIN files, track counts)
 - `redump_engine/cuesheets.py`: trusted cue lookup and replacement from cue ZIPs
 - `main.py`: CLI entrypoint
 
@@ -46,6 +47,25 @@ python main.py verify --game-dir "Sony - PlayStation/Game Name"
 python main.py verify --game-dir "Sony - PlayStation/Game Name" --csv reports/verify.csv
 python main.py update --systems psx ps2
 python main.py update --systems psx --no-cuesheets
+python main.py verify --rehash
+```
+
+Safety behavior:
+
+- `chdman` never overwrites existing outputs unless you pass `--force`.
+- `convert` runs `chdman verify` on each new CHD before deleting the source files; a failed verification keeps the sources and writes no manifest.
+- `extract` only deletes a CHD after the extracted files exist and the manifest is written.
+- A failure in one game directory is reported and the batch continues; the exit code is non-zero if any game failed.
+- `verify --rehash` re-hashes payload files on disk against the manifest in addition to the DAT check.
+- `update` validates each download as a ZIP and keeps the previous archive if the download fails.
+- Running from a folder that itself contains disc images or a manifest prints a warning; use `--game-dir` for that case.
+
+Development (also run in CI):
+
+```powershell
+pip install -e ".[dev]"
+python -m ruff check .
+python -m pyright
 ```
 
 Dry-run preview:

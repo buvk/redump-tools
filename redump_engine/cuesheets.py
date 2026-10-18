@@ -47,10 +47,9 @@ class CueRepository:
         if key in self.index:
             return self.index[key]
 
-        for known, hit in self.index.items():
-            if known.startswith(key) or key.startswith(known):
-                return hit
-        return None
+        fuzzy = [hit for known, hit in self.index.items() if known.startswith(key) or key.startswith(known)]
+        # Refuse to guess when several cues could match (e.g. "Game" vs "Game 2").
+        return fuzzy[0] if len(fuzzy) == 1 else None
 
     def copy_trusted_cue(self, dat_name: str, destination: Path, expected_bin_name: str | None = None) -> bool:
         hit = self.find(dat_name)

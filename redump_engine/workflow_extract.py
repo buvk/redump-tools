@@ -3,9 +3,9 @@ from __future__ import annotations
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 from .chd_ops import Chdman, ChdmanError
+from .cue import bin_files_from_cue
 from .cuesheets import CueRepository
 from .filenames import dat_folder_name, dat_output_stem, normalize_name, parse_disc_number, rename_if_needed
 from .metadata import (
@@ -728,21 +728,4 @@ class ExtractWorkflow:
         markers = ["file \"", "track ", "datafile \"", "cd_rom"]
         return any(marker in snippet for marker in markers)
 
-    @staticmethod
-    def _bin_files_from_cue(cue_path: Path) -> list[Path]:
-        bins: list[Path] = []
-        if not cue_path.exists():
-            return bins
-        for line in cue_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            stripped = line.strip()
-            lower = stripped.lower()
-            if not (lower.startswith("file") or lower.startswith("datafile")):
-                continue
-
-            match = re.search(r'"([^"]+)"', stripped)
-            if not match:
-                continue
-            candidate = cue_path.parent / match.group(1)
-            if candidate.suffix.lower() == ".bin":
-                bins.append(candidate)
-        return bins
+    _bin_files_from_cue = staticmethod(bin_files_from_cue)

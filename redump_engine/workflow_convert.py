@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
-from .chd_ops import Chdman
+from .chd_ops import Chdman, ChdmanError
+from .cue import bin_files_from_cue, count_tracks_in_cue
 from .filenames import dat_folder_name, dat_output_stem, parse_disc_number
 from .metadata import (
     DatEntry,
@@ -85,6 +86,7 @@ class ConvertWorkflow:
                 )
                 self.chdman.createcd(source.source_file, output_chd)
             created_chds.append(output_chd)
+            self._verify_created_chd(output_chd)
 
             payload_files = self._payload_files_for_source(source)
 
@@ -120,6 +122,15 @@ class ConvertWorkflow:
             "dat_name": dat_name,
             "created": [str(path) for path in created_chds],
         }
+
+    def _verify_created_chd(self, chd_path: Path) -> None:
+        """Ensure the CHD is usable before any source file is deleted."""
+        if self.dry_run:
+            return
+        if not chd_path.is_file() or chd_path.stat().st_size == 0:
+            raise ChdmanError(f"CHD was not created or is empty: {chd_path.name}")
+        self._log(f"verifying created chd: {chd_path.name}")
+        self.chdman.verify(chd_path)
 
     def _discover_sources(self, game_dir: Path) -> list[SourceDisc]:
         sources: list[SourceDisc] = []
@@ -197,13 +208,7 @@ class ConvertWorkflow:
             return "name+checksum"
         return "name"
 
-    @staticmethod
-    def _count_tracks_in_cue(cue_path: Path) -> int:
-        count = 0
-        for line in cue_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if line.strip().lower().startswith("track "):
-                count += 1
-        return max(count, 1)
+    _count_tracks_in_cue = staticmethod(count_tracks_in_cue)
 
     @staticmethod
     def _write_m3u(game_dir: Path, dat_name: str, chd_files: list[Path]) -> None:
@@ -243,20 +248,7 @@ class ConvertWorkflow:
                     self._log(f"cleanup remove source bin: {path.name}")
                     path.unlink(missing_ok=True)
 
-    @staticmethod
-    def _bin_files_from_cue(cue_path: Path) -> list[Path]:
-        bins: list[Path] = []
-        for line in cue_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            stripped = line.strip()
-            if not stripped.lower().startswith("file"):
-                continue
-            parts = stripped.split('"')
-            if len(parts) < 2:
-                continue
-            candidate = cue_path.parent / parts[1]
-            if candidate.suffix.lower() == ".bin":
-                bins.append(candidate)
-        return bins
+    _bin_files_from_cue = staticmethod(bin_files_from_cue)
 
     def _rename_folder_if_needed(self, game_dir: Path, dat_name: str) -> None:
         desired = dat_folder_name(dat_name)

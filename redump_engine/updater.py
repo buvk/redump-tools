@@ -5,6 +5,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import Request, urlopen
+from zipfile import BadZipFile, ZipFile
+
+DOWNLOAD_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -26,7 +29,7 @@ class UpdateResult:
     url: str
     destination: Path
     changed: bool
-
+    error: str | None = None
 
 ASSETS: tuple[RedumpAsset, ...] = (
     RedumpAsset(system="psx", kind="dat", url="https://redump.info/datfile/PSX", target_name="redump_psx_dat.zip"),
@@ -79,7 +82,20 @@ def update_assets(
 
         if not dry_run:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            _download_to_path(asset.url, destination)
+            try:
+                _download_to_path(asset.url, destination)
+            except (OSError, ValueError, BadZipFile) as exc:
+                results.append(
+                    UpdateResult(
+                        system=asset.system,
+                        kind=asset.kind,
+                        url=asset.url,
+                        destination=destination,
+                        changed=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+                continue
 
         results.append(
             UpdateResult(
@@ -102,9 +118,21 @@ def _download_to_path(url: str, destination: Path) -> None:
             "Accept": "application/zip, application/octet-stream;q=0.9, */*;q=0.1",
         },
     )
-    with urlopen(request) as response:
-        with tempfile.NamedTemporaryFile(delete=False, dir=destination.parent, suffix=".tmp") as handle:
-            temp_path = Path(handle.name)
-            shutil.copyfileobj(response, handle)
+    temp_path: Path | None = None
+    try:
+        with urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+            with tempfile.NamedTemporaryFile(delete=False, dir=destination.parent, suffix=".tmp") as handle:
+                temp_path = Path(handle.name)
+                shutil.copyfileobj(response, handle)
 
-    temp_path.replace(destination)
+        # Never replace a good archive with an HTML error page or truncated download.
+        with ZipFile(temp_path) as archive:
+            bad_member = archive.testzip()
+        if bad_member is not None:
+            raise BadZipFile(f"corrupt member in downloaded archive: {bad_member}")
+
+        temp_path.replace(destination)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)

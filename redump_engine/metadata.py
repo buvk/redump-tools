@@ -4,9 +4,11 @@ import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
+import zlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import Any, cast
 from zipfile import ZipFile
 
 from .filenames import normalize_name, parse_disc_number
@@ -32,10 +34,11 @@ def _empty_dat_entries_by_checksum() -> dict[str, list[DatEntry]]:
 
 
 def payload_file_from_path(path: Path, kind: str) -> PayloadFile:
+    sha1, crc32 = compute_hashes(path)
     return {
         "name": path.name,
-        "sha1": compute_sha1(path),
-        "crc32": compute_crc32(path),
+        "sha1": sha1,
+        "crc32": crc32,
         "size": path.stat().st_size,
         "kind": kind,
     }
@@ -334,13 +337,18 @@ def compute_sha1(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def compute_crc32(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    import zlib
+    return compute_hashes(path, chunk_size)[1]
 
+
+def compute_hashes(path: Path, chunk_size: int = 1024 * 1024) -> tuple[str, str]:
+    """Return (sha1, crc32) computed in a single pass over the file."""
+    digest = hashlib.sha1()
     crc = 0
     with path.open("rb") as handle:
         while chunk := handle.read(chunk_size):
+            digest.update(chunk)
             crc = zlib.crc32(chunk, crc)
-    return f"{crc & 0xFFFFFFFF:08x}"
+    return digest.hexdigest(), f"{crc & 0xFFFFFFFF:08x}"
 
 
 def load_manifest(manifest_path: Path) -> Manifest | None:
@@ -405,8 +413,12 @@ def match_dat_entries_for_files(paths: list[Path], dat_index: DatIndex | None) -
     if not payload_paths:
         return []
 
-    sha1s = {compute_sha1(path).lower() for path in payload_paths}
-    crc32s = {compute_crc32(path).lower() for path in payload_paths}
+    sha1s: set[str] = set()
+    crc32s: set[str] = set()
+    for path in payload_paths:
+        sha1, crc32 = compute_hashes(path)
+        sha1s.add(sha1.lower())
+        crc32s.add(crc32.lower())
     return dat_index.checksum_matches(sha1s=sha1s, crc32s=crc32s)
 
 

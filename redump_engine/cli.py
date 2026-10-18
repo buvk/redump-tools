@@ -10,7 +10,7 @@ from .metadata import load_dat_index
 from .updater import available_systems, update_assets
 from .workflow_convert import ConvertWorkflow
 from .workflow_extract import ExtractWorkflow
-from .workflow_verify import VerifyWorkflow
+from .workflow_verify import VerifyResult, VerifyWorkflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,23 +22,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chdman", type=Path, default=Path("tools") / "chdman.exe", help="Path to chdman executable")
     parser.add_argument("--dry-run", action="store_true", help="Print intended actions without modifying files")
     parser.add_argument("--verbose", action="store_true", help="Print detailed decision and action logs")
+    parser.add_argument("--force", action="store_true", help="Allow chdman to overwrite existing output files")
+
+    # Subcommand copies of the global flags use SUPPRESS so they never reset a value given before the subcommand.
+    def shared_flag(sub: argparse.ArgumentParser, name: str, help_text: str) -> None:
+        sub.add_argument(name, action="store_true", default=argparse.SUPPRESS, help=help_text)
+
+    dry_run_help = "Print intended actions without modifying files"
+    verbose_help = "Print detailed decision and action logs"
+    force_help = "Allow chdman to overwrite existing output files"
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     extract = subparsers.add_parser("extract", help="Extract CHD files to ISO or BIN/CUE")
     extract.add_argument("--game-dir", type=Path, help="Process one specific game directory")
-    extract.add_argument("--dry-run", action="store_true", help="Print intended actions without modifying files")
-    extract.add_argument("--verbose", action="store_true", help="Print detailed decision and action logs")
+    shared_flag(extract, "--dry-run", dry_run_help)
+    shared_flag(extract, "--verbose", verbose_help)
+    shared_flag(extract, "--force", force_help)
 
     convert = subparsers.add_parser("convert", help="Convert ISO/BIN/CUE files to CHD")
     convert.add_argument("--game-dir", type=Path, help="Process one specific game directory")
-    convert.add_argument("--dry-run", action="store_true", help="Print intended actions without modifying files")
-    convert.add_argument("--verbose", action="store_true", help="Print detailed decision and action logs")
+    shared_flag(convert, "--dry-run", dry_run_help)
+    shared_flag(convert, "--verbose", verbose_help)
+    shared_flag(convert, "--force", force_help)
 
     verify = subparsers.add_parser("verify", help="Verify manifest payload checksums against DAT entries")
     verify.add_argument("--game-dir", type=Path, help="Process one specific game directory")
-    verify.add_argument("--verbose", action="store_true", help="Print detailed decision and action logs")
+    shared_flag(verify, "--verbose", verbose_help)
     verify.add_argument("--csv", type=Path, help="Optional CSV output path for verify results")
+    verify.add_argument(
+        "--rehash",
+        action="store_true",
+        help="Also re-hash the payload files on disk and compare them with the manifest",
+    )
 
     update = subparsers.add_parser("update", help="Download current DAT and cuesheet ZIP archives")
     update.add_argument(
@@ -50,26 +66,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     update.add_argument("--no-dats", action="store_true", help="Skip DAT downloads")
     update.add_argument("--no-cuesheets", action="store_true", help="Skip cuesheet downloads")
-    update.add_argument("--dry-run", action="store_true", help="Print intended actions without modifying files")
-    update.add_argument("--verbose", action="store_true", help="Print detailed download logs")
+    shared_flag(update, "--dry-run", dry_run_help)
+    shared_flag(update, "--verbose", "Print detailed download logs")
+
+    # Path options are accepted after the subcommand as well as before it.
+    for sub in (extract, convert, verify, update):
+        sub.add_argument("--root", type=Path, default=argparse.SUPPRESS, help="Workspace root or platform folder")
+        sub.add_argument("--dats", type=Path, default=argparse.SUPPRESS, help="Directory with DAT files or ZIP archives")
+        sub.add_argument("--cuesheets", type=Path, default=argparse.SUPPRESS, help="Directory with cuesheet files or ZIP archives")
+        sub.add_argument("--chdman", type=Path, default=argparse.SUPPRESS, help="Path to chdman executable")
 
     return parser
 
 
 def _resolve(root: Path, child: Path) -> Path:
-    return child if child.is_absolute() else root / child
+    """Resolve a relative path against the root, falling back to the working directory."""
+    if child.is_absolute():
+        return child
+    candidate = root / child
+    if candidate.exists():
+        return candidate
+    fallback = Path.cwd() / child
+    return fallback if fallback.exists() else candidate
+
+
+_SKIPPED_DIRS = {"dats", "cuesheets", "tools", "redump_engine", "scripts", "tests", "reports", "__pycache__"}
 
 
 def _iter_game_dirs(root: Path) -> list[Path]:
     game_dirs: list[Path] = []
-    for platform in sorted(root.iterdir()):
-        if not platform.is_dir():
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
             continue
-        if platform.name.lower() in {"dats", "cuesheets", "tools", "redump_engine", "scripts", "__pycache__"}:
+        if child.name.startswith(".") or child.name.lower() in _SKIPPED_DIRS:
             continue
-        for game in sorted(platform.iterdir()):
+        # --root may be a platform folder (children are games) or a library (children are platforms).
+        if _looks_like_single_game_dir(child):
+            game_dirs.append(child)
+            continue
+        for game in sorted(child.iterdir()):
             if game.is_dir():
                 game_dirs.append(game)
+
+    if not game_dirs and _looks_like_single_game_dir(root):
+        print(f"[warn] {root} is itself a game folder; use --game-dir to process it")
     return game_dirs
 
 
@@ -92,11 +132,21 @@ def _expand_game_dir(target: Path) -> list[Path]:
     return [target]
 
 
-def run() -> int:
+def _clean_path_args(args: argparse.Namespace) -> None:
+    """Drop stray quotes left by Windows parsing of a trailing backslash, e.g. "C:\\dir\\"."""
+    for name, value in vars(args).items():
+        if isinstance(value, Path):
+            setattr(args, name, Path(str(value).replace('"', "").strip()))
+
+
+def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    _clean_path_args(args)
 
     root = args.root.resolve()
+    if not root.is_dir():
+        parser.error(f"--root is not an existing directory: {root}")
     dats = _resolve(root, args.dats).resolve()
     cuesheets = _resolve(root, args.cuesheets).resolve()
 
@@ -116,13 +166,16 @@ def run() -> int:
             verbose=args.verbose,
         )
         for result in results:
+            if result.error:
+                print(f"[update] FAILED {result.system} {result.kind}: {result.error}")
+                continue
             action = "planned" if args.dry_run else "downloaded"
             print(f"[update] {action} {result.system} {result.kind}: {result.destination}")
-        return 0
+        return 1 if any(result.error for result in results) else 0
 
     chdman_path = _resolve(root, args.chdman).resolve()
     dat_index = load_dat_index(dats)
-    chdman = Chdman(chdman_path, dry_run=args.dry_run)
+    chdman = Chdman(chdman_path, dry_run=args.dry_run, force=args.force, progress=True)
 
     if args.game_dir:
         game_dirs = _expand_game_dir((_resolve(root, args.game_dir)).resolve())
@@ -137,35 +190,67 @@ def run() -> int:
             dry_run=args.dry_run,
             verbose=args.verbose,
         )
+        processed = 0
+        errors = 0
         for game_dir in game_dirs:
             if not any(game_dir.glob("*.chd")):
                 continue
-            results = workflow.process_game_dir(game_dir)
+            processed += 1
+            try:
+                results = workflow.process_game_dir(game_dir)
+            except Exception as exc:  # keep going so one bad game does not abort the batch
+                errors += 1
+                print(f"[extract] ERROR {game_dir.name}: {exc}")
+                continue
             for result in results:
                 print(
                     f"[extract] {result.game_dir.name}: "
                     f"strategy={result.strategy}, decision={result.decision}, extracted={len(result.extracted_files)}"
                 )
-        return 0
+        if processed == 0:
+            print("[extract] no .chd files found in the selected directories; nothing to do")
+        else:
+            print(f"[extract] summary: processed={processed} errors={errors}")
+        return 1 if errors else 0
 
     if args.command == "convert":
         workflow = ConvertWorkflow(chdman=chdman, dat_index=dat_index, dry_run=args.dry_run, verbose=args.verbose)
+        converted = 0
+        errors = 0
         for game_dir in game_dirs:
-            report = workflow.process_game_dir(game_dir)
+            try:
+                report = workflow.process_game_dir(game_dir)
+            except Exception as exc:  # keep going so one bad game does not abort the batch
+                errors += 1
+                print(f"[convert] ERROR {game_dir.name}: {exc}")
+                continue
             if report.get("status") == "converted":
+                converted += 1
                 print(f"[convert] {game_dir.name}: discs={report['discs']} dat_name={report['dat_name']}")
-        return 0
+        print(f"[convert] summary: converted={converted} errors={errors}")
+        return 1 if errors else 0
 
     if args.command == "verify":
-        workflow = VerifyWorkflow(dat_index=dat_index, verbose=args.verbose)
+        workflow = VerifyWorkflow(dat_index=dat_index, verbose=args.verbose, rehash=args.rehash)
         passed = 0
         failed = 0
         skipped = 0
         csv_rows: list[dict[str, str]] = []
         for game_dir in game_dirs:
-            result = workflow.process_game_dir(game_dir)
+            try:
+                result = workflow.process_game_dir(game_dir)
+            except Exception as exc:  # e.g. malformed manifest.json
+                result = VerifyResult(
+                    game_dir=game_dir,
+                    manifest_path=game_dir / "manifest.json",
+                    status="failed",
+                    dat_name="",
+                    matched_dat_name=None,
+                    details=[f"error: {exc}"],
+                )
             if result.status == "skipped":
                 skipped += 1
+                print(f"[verify] SKIP {game_dir}: {'; '.join(result.details)}")
                 csv_rows.append(
                     {
                         "game_dir": str(game_dir),

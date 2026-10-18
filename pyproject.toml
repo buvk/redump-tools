@@ -4,6 +4,28 @@ version = "0.1.0"
 description = "Manifest-driven CHD extraction, conversion, verification, and asset update workflows"
 requires-python = ">=3.11"
 
+[project.scripts]
+redump-tools = "redump_engine.cli:run"
+
+[project.optional-dependencies]
+dev = ["ruff>=0.5", "pyright>=1.1.370"]
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["redump_engine"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pyright]
+include = ["redump_engine", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"

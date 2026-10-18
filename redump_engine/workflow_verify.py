@@ -4,7 +4,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .filenames import dat_folder_name, normalize_name
-from .metadata import DatIndex, load_manifest, match_dat_entry, payload_checksums_from_payload_files
+from .metadata import (
+    DatIndex,
+    ManifestDisc,
+    compute_hashes,
+    load_manifest,
+    match_dat_entry,
+    payload_checksums_from_payload_files,
+)
 
 
 def _empty_details() -> list[str]:
@@ -22,13 +29,28 @@ class VerifyResult:
 
 
 class VerifyWorkflow:
-    def __init__(self, dat_index: DatIndex | None, verbose: bool = False):
+    def __init__(self, dat_index: DatIndex | None, verbose: bool = False, rehash: bool = False):
         self.dat_index = dat_index
         self.verbose = verbose
+        self.rehash = rehash
 
     def _log(self, message: str) -> None:
         if self.verbose:
             print(f"[verbose][verify] {message}")
+
+    def _rehash_problems(self, game_dir: Path, disc: ManifestDisc) -> list[str]:
+        """Compare files on disk with the checksums recorded in the manifest."""
+        problems: list[str] = []
+        for payload in disc.payload_files:
+            name = str(payload.get("name", ""))
+            path = game_dir / name
+            if not name or not path.is_file():
+                problems.append(f"disc {disc.disc}: payload file missing on disk: {name or '<unnamed>'}")
+                continue
+            sha1, crc32 = compute_hashes(path)
+            if sha1 != str(payload.get("sha1", "")).lower() or crc32 != str(payload.get("crc32", "")).lower():
+                problems.append(f"disc {disc.disc}: checksum mismatch on disk: {name}")
+        return problems
 
     def process_game_dir(self, game_dir: Path) -> VerifyResult:
         manifest_path = game_dir / "manifest.json"
@@ -68,6 +90,17 @@ class VerifyWorkflow:
         notes: list[str] = []
 
         for disc in manifest.disc_entries:
+            if self.rehash:
+                problems = self._rehash_problems(game_dir, disc)
+                if problems:
+                    return VerifyResult(
+                        game_dir=game_dir,
+                        manifest_path=manifest_path,
+                        status="failed",
+                        dat_name=manifest.dat_name,
+                        matched_dat_name=None,
+                        details=problems,
+                    )
             sha1s, crc32s = payload_checksums_from_payload_files(disc.payload_files)
             if not sha1s and not crc32s:
                 details.append(f"disc {disc.disc}: missing payload checksums")

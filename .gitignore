@@ -17,3 +17,7 @@ dats/
 *.m3u
 *.chd
 tools/chdman.exe
+*.iso
+*.bin
+*.cue
+manifest.json
