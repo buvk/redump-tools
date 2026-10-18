@@ -69,33 +69,53 @@ class ConvertWorkflow:
         dat_name = dat_folder_name(self._resolve_dat_name(sources, game_dir))
         self._log(f"resolved dat_name={dat_name}, discs={len(sources)}")
         total_discs = len(sources)
+        output_by_source = {
+            source.source_file: game_dir / f"{dat_output_stem(dat_name, source.disc_number, total_discs)}.chd"
+            for source in sources
+        }
+        if not self.dry_run and not self.chdman.force:
+            existing_outputs = sorted(path.name for path in output_by_source.values() if path.exists())
+            if existing_outputs:
+                raise ChdmanError(
+                    "Refusing to start conversion because output already exists (use --force): "
+                    + ", ".join(existing_outputs)
+                )
+
         created_chds: list[Path] = []
+        preexisting_outputs = {path for path in output_by_source.values() if path.exists()}
         manifest_discs: list[ManifestDisc] = []
 
-        for source in sources:
-            stem = dat_output_stem(dat_name, source.disc_number, total_discs)
-            output_chd = game_dir / f"{stem}.chd"
-            if source.file_type == "iso":
-                self._log(
-                    f"createdvd disc={source.disc_number}, input={source.source_file.name}, output={output_chd.name}"
-                )
-                self.chdman.createdvd(source.source_file, output_chd)
-            else:
-                self._log(
-                    f"createcd disc={source.disc_number}, input={source.source_file.name}, output={output_chd.name}"
-                )
-                self.chdman.createcd(source.source_file, output_chd)
-            created_chds.append(output_chd)
-            self._verify_created_chd(output_chd)
+        try:
+            for source in sources:
+                output_chd = output_by_source[source.source_file]
+                if source.file_type == "iso":
+                    self._log(
+                        f"createdvd disc={source.disc_number}, input={source.source_file.name}, output={output_chd.name}"
+                    )
+                    self.chdman.createdvd(source.source_file, output_chd)
+                else:
+                    self._log(
+                        f"createcd disc={source.disc_number}, input={source.source_file.name}, output={output_chd.name}"
+                    )
+                    self.chdman.createcd(source.source_file, output_chd)
+                created_chds.append(output_chd)
+                self._verify_created_chd(output_chd)
 
-            payload_files = self._payload_files_for_source(source)
-
-            manifest_discs.append(
-                ManifestDisc(
-                    disc=source.disc_number,
-                    payload_files=payload_files,
+                payload_files = self._payload_files_for_source(source)
+                manifest_discs.append(
+                    ManifestDisc(
+                        disc=source.disc_number,
+                        payload_files=payload_files,
+                    )
                 )
-            )
+        except Exception:
+            # Keep original source files. Remove only outputs newly created by this
+            # invocation so a retry does not get blocked by its own partial results.
+            if not self.dry_run:
+                for output_chd in created_chds:
+                    if output_chd not in preexisting_outputs:
+                        output_chd.unlink(missing_ok=True)
+            raise
 
         if total_discs > 1 and not self.dry_run:
             self._log(f"writing m3u: {dat_name}.m3u")
@@ -159,6 +179,19 @@ class ConvertWorkflow:
             )
 
         sources.sort(key=lambda s: s.disc_number)
+        disc_numbers = [source.disc_number for source in sources]
+        duplicates = sorted({number for number in disc_numbers if disc_numbers.count(number) > 1})
+        if duplicates:
+            raise ChdmanError(
+                "Duplicate disc numbers in source set: " + ", ".join(str(number) for number in duplicates)
+            )
+        if len(disc_numbers) > 1:
+            expected = set(range(min(disc_numbers), max(disc_numbers) + 1))
+            missing = sorted(expected.difference(disc_numbers))
+            if missing:
+                raise ChdmanError(
+                    "Disc-number gap in source set; missing: " + ", ".join(str(number) for number in missing)
+                )
         return sources
 
     def _discover_source(
