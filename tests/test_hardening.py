@@ -76,6 +76,14 @@ class CueHelperTests(unittest.TestCase):
             self.assertIsNone(repo.find("Game"))
             self.assertIsNotNone(repo.find("Game 2 (USA)"))
 
+    def test_cue_repository_refuses_duplicate_normalized_exact_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Game (USA).cue").write_text("first", encoding="utf-8")
+            (root / "game-usa.cue").write_text("second", encoding="utf-8")
+
+            self.assertIsNone(CueRepository(root).find("Game (USA)"))
+
 
 class HashTests(unittest.TestCase):
     def test_single_pass_hashes_match_individual_helpers(self) -> None:
@@ -129,6 +137,51 @@ class ConvertSafetyTests(unittest.TestCase):
 
             self.assertTrue(iso.exists())
             self.assertFalse((game_dir / "manifest.json").exists())
+
+    def test_duplicate_disc_numbers_are_rejected_before_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp) / "Game"
+            game_dir.mkdir()
+            first = game_dir / "First.iso"
+            second = game_dir / "Second.iso"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            workflow = ConvertWorkflow(chdman=FakeChdman(), dat_index=None)
+
+            with self.assertRaisesRegex(ChdmanError, "Duplicate disc numbers"):
+                workflow.process_game_dir(game_dir)
+
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+            self.assertEqual([], list(game_dir.glob("*.chd")))
+
+    def test_failed_later_disc_removes_new_partial_outputs_and_keeps_sources(self) -> None:
+        class FailSecondDisc(FakeChdman):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def createdvd(self, input_image: Path, output_chd: Path) -> str:
+                self.calls += 1
+                if self.calls == 2:
+                    raise ChdmanError("simulated second-disc failure")
+                return super().createdvd(input_image, output_chd)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp) / "Game"
+            game_dir.mkdir()
+            first = game_dir / "Game (Disc 1).iso"
+            second = game_dir / "Game (Disc 2).iso"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            workflow = ConvertWorkflow(chdman=FailSecondDisc(), dat_index=None)
+
+            with self.assertRaisesRegex(ChdmanError, "simulated second-disc failure"):
+                workflow.process_game_dir(game_dir)
+
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+            self.assertEqual([], list(game_dir.glob("*.chd")))
 
     def test_convert_then_extract_round_trip_and_verify_rehash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
