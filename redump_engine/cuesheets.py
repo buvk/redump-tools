@@ -16,10 +16,10 @@ class CueHit:
 class CueRepository:
     def __init__(self, cues_root: Path):
         self.cues_root = cues_root
-        self._index: dict[str, CueHit] | None = None
+        self._index: dict[str, list[CueHit]] | None = None
 
-    def _build_index(self) -> dict[str, CueHit]:
-        index: dict[str, CueHit] = {}
+    def _build_index(self) -> dict[str, list[CueHit]]:
+        index: dict[str, list[CueHit]] = {}
         if not self.cues_root.exists():
             return index
 
@@ -30,25 +30,33 @@ class CueRepository:
                         if not member.lower().endswith(".cue"):
                             continue
                         key = normalize_name(Path(member).stem)
-                        index[key] = CueHit(zip_path=item, member=member)
+                        index.setdefault(key, []).append(CueHit(zip_path=item, member=member))
             elif item.is_file() and item.suffix.lower() == ".cue":
                 key = normalize_name(item.stem)
-                index[key] = CueHit(zip_path=item, member=item.name)
+                index.setdefault(key, []).append(CueHit(zip_path=item, member=item.name))
         return index
 
     @property
-    def index(self) -> dict[str, CueHit]:
+    def index(self) -> dict[str, list[CueHit]]:
         if self._index is None:
             self._index = self._build_index()
         return self._index
 
     def find(self, dat_name: str) -> CueHit | None:
         key = normalize_name(dat_name)
-        if key in self.index:
-            return self.index[key]
+        exact = self.index.get(key, [])
+        # Duplicate normalized names across archives/files are ambiguous too. Never
+        # let filesystem iteration order silently decide which trusted cue wins.
+        if exact:
+            return exact[0] if len(exact) == 1 else None
 
-        fuzzy = [hit for known, hit in self.index.items() if known.startswith(key) or key.startswith(known)]
-        # Refuse to guess when several cues could match (e.g. "Game" vs "Game 2").
+        fuzzy = [
+            hit
+            for known, hits in self.index.items()
+            if known.startswith(key) or key.startswith(known)
+            for hit in hits
+        ]
+        # Refuse to guess when several cues could match (including duplicate names).
         return fuzzy[0] if len(fuzzy) == 1 else None
 
     def copy_trusted_cue(self, dat_name: str, destination: Path, expected_bin_name: str | None = None) -> bool:
