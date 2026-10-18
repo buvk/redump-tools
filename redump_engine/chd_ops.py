@@ -43,7 +43,7 @@ class Chdman:
         # CHT2 metadata entries map to per-track descriptors in CD CHDs.
         track_count = len(re.findall(r"Tag='CHT2'", output, flags=re.IGNORECASE))
         has_cd_metadata = bool(re.search(r"Tag='CHT2'", output, flags=re.IGNORECASE))
-        has_dvd_metadata = bool(re.search(r"Tag='DVD\\s*'", output, flags=re.IGNORECASE))
+        has_dvd_metadata = bool(re.search(r"Tag='DVD\s*'", output, flags=re.IGNORECASE))
         return ChdInfo(
             logical_size=logical_size,
             track_count=track_count,

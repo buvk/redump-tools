@@ -139,7 +139,7 @@ class ExtractWorkflow:
                 )
                 strategy = "heuristic"
 
-        removed_files = self._cleanup_after_extract(game_dir, chd_file)
+        self._validate_extracted_files(extracted_files)
         checksum_dat_matches: list[DatEntry] = []
         if not self.dry_run:
             checksum_dat_matches = match_dat_entries_for_files(extracted_files, self.dat_index)
@@ -170,6 +170,7 @@ class ExtractWorkflow:
         self._log(f"resolved dat_name={dat_name}, decision={decision}, strategy={strategy}")
         extracted_files = self._rename_and_replace_cue(game_dir, extracted_files, resolved_dat_entry, decision)
         self._write_extract_manifest(game_dir, chd_file, extracted_files, decision, dat_name)
+        removed_files = self._cleanup_after_extract(game_dir, chd_file)
 
         return ExtractResult(
             game_dir=game_dir,
@@ -179,6 +180,18 @@ class ExtractWorkflow:
             decision=decision,
             dat_name=dat_name,
         )
+
+    def _validate_extracted_files(self, extracted: list[Path]) -> None:
+        if self.dry_run:
+            return
+
+        missing = [path for path in extracted if not path.is_file()]
+        if missing:
+            names = ", ".join(path.name for path in missing)
+            raise ChdmanError(f"Extraction output is missing expected files: {names}")
+
+        if not any(path.suffix.lower() in {".bin", ".iso"} for path in extracted):
+            raise ChdmanError("Extraction did not produce an ISO or BIN payload")
 
     def _write_extract_manifest(
         self,
@@ -496,18 +509,26 @@ class ExtractWorkflow:
             return
 
         if cue.exists():
-            self._log(f"replacing cue with trusted source: {cue.name}")
-            cue.unlink()
-
-        copied = self.cues.copy_trusted_cue(
-            dat_name,
-            cue,
-            expected_bin_name=self._expected_bin_name(extracted),
-        )
-        if not copied and dat_entry is not None:
-            raise RuntimeError(f"Trusted cue not found for DAT entry: {dat_name}")
-        if copied:
-            self._log(f"trusted cue copied: {cue.name}")
+            with tempfile.NamedTemporaryFile(
+                dir=cue.parent,
+                prefix=f".{cue.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                trusted_cue = Path(handle.name)
+            try:
+                copied = self.cues.copy_trusted_cue(
+                    dat_name,
+                    trusted_cue,
+                    expected_bin_name=self._expected_bin_name(extracted),
+                )
+                if not copied and dat_entry is not None:
+                    raise RuntimeError(f"Trusted cue not found for DAT entry: {dat_name}")
+                if copied:
+                    trusted_cue.replace(cue)
+                    self._log(f"trusted cue copied: {cue.name}")
+            finally:
+                trusted_cue.unlink(missing_ok=True)
 
     @staticmethod
     def _existing_extracted_files(extracted: list[Path]) -> list[Path]:

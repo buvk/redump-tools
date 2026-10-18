@@ -7,9 +7,10 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from redump_engine.chd_ops import Chdman
+from redump_engine.chd_ops import ChdInfo, Chdman, ChdmanError
 from redump_engine.cuesheets import CueRepository
 from redump_engine.metadata import DatEntry, DatRom, load_dat_index
 from redump_engine.updater import selected_assets, update_assets
@@ -70,6 +71,48 @@ class ExtractWorkflowHarness(ExtractWorkflow):
 
 
 class WorkflowRefactorTests(unittest.TestCase):
+    def test_chdman_info_detects_dvd_metadata(self) -> None:
+        output = "Metadata: Tag='DVD '  Length=..."
+        completed = SimpleNamespace(stdout=output, stderr="", returncode=0)
+
+        with patch("redump_engine.chd_ops.subprocess.run", return_value=completed):
+            info = Chdman(Path("chdman.exe")).info(Path("game.chd"))
+
+        self.assertTrue(info.has_dvd_metadata)
+
+    def test_extract_keeps_chd_when_tool_does_not_create_payload(self) -> None:
+        class NoOutputChdman(Chdman):
+            def __init__(self) -> None:
+                super().__init__(Path("chdman.exe"))
+
+            def info(self, input_chd: Path) -> ChdInfo:
+                return ChdInfo(
+                    logical_size=900 * 1024 * 1024,
+                    track_count=0,
+                    has_cd_metadata=False,
+                    has_dvd_metadata=False,
+                    raw_output="",
+                )
+
+            def extractdvd(self, input_chd: Path, output_file: Path) -> str:
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            game_dir = Path(tmp) / "game"
+            game_dir.mkdir()
+            chd_path = game_dir / "Game.chd"
+            chd_path.write_bytes(b"source")
+            workflow = ExtractWorkflow(
+                chdman=NoOutputChdman(),
+                dat_index=None,
+                cues=CueRepository(Path(tmp) / "cues"),
+            )
+
+            with self.assertRaisesRegex(ChdmanError, "missing expected files"):
+                workflow.process_game_dir(game_dir)
+
+            self.assertTrue(chd_path.exists())
+
     def test_update_asset_selection_filters_systems_and_kinds(self) -> None:
         assets = selected_assets(["psx"], include_dats=False, include_cuesheets=True)
 
@@ -214,6 +257,35 @@ class WorkflowRefactorTests(unittest.TestCase):
 
             self.assertTrue(cue_path.exists())
             self.assertEqual('FILE "Renamed.bin" BINARY\n', cue_path.read_text(encoding="utf-8"))
+
+    def test_replace_cue_preserves_extracted_cue_when_trusted_cue_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game_dir = root / "game"
+            game_dir.mkdir()
+            cue_path = game_dir / "Game.cue"
+            cue_path.write_text('FILE "Game.bin" BINARY\n', encoding="utf-8")
+            bin_path = game_dir / "Game.bin"
+            bin_path.write_bytes(b"payload")
+            dat_entry = DatEntry(
+                name="Game",
+                roms=[DatRom(name="Game.cue"), DatRom(name="Game.bin")],
+            )
+            workflow = ExtractWorkflowHarness(
+                chdman=DummyChdman(),
+                dat_index=None,
+                cues=CueRepository(root / "missing-cues"),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Trusted cue not found"):
+                workflow.replace_cue_with_trusted_source(
+                    dat_name="Game",
+                    extracted=[cue_path, bin_path],
+                    decision="bin-cue",
+                    dat_entry=dat_entry,
+                )
+
+            self.assertEqual('FILE "Game.bin" BINARY\n', cue_path.read_text(encoding="utf-8"))
 
     def test_replace_cue_with_trusted_source_preserves_multi_bin_cue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
