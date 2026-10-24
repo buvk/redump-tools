@@ -15,7 +15,7 @@ from redump_engine.cuesheets import CueRepository
 from redump_engine.metadata import DatEntry, DatRom, load_dat_index
 from redump_engine.updater import selected_assets, update_assets
 from redump_engine.workflow_convert import ConvertWorkflow, SourceDisc
-from redump_engine.workflow_extract import ExtractWorkflow
+from redump_engine.workflow_extract import ExtractResult, ExtractWorkflow
 
 
 def _dat_xml(name: str, rom_name: str, payload: bytes) -> str:
@@ -71,6 +71,41 @@ class ExtractWorkflowHarness(ExtractWorkflow):
 
 
 class WorkflowRefactorTests(unittest.TestCase):
+    def test_extract_folder_rename_handles_working_directory_and_windows_lock(self) -> None:
+        for scenario in ("cwd", "ancestor", "locked", "rename"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                game_dir = root / "original"
+                game_dir.mkdir()
+                (game_dir / "Game.chd").touch()
+                payload = game_dir / "Game.iso"
+                payload.write_bytes(b"payload")
+                result = ExtractResult(game_dir, [payload], [], "heuristic", "iso", "Game")
+                workflow = ExtractWorkflow(DummyChdman(), None, CueRepository(root / "cues"))
+                cwd = game_dir if scenario == "cwd" else game_dir / "child" if scenario == "ancestor" else root
+                lock_error = OSError("folder in use")
+                lock_error.winerror = 32
+                output = io.StringIO()
+                with (
+                    patch.object(workflow, "_extract_one", return_value=result),
+                    patch.object(workflow, "_finalize_m3u_after_extract"),
+                    patch("pathlib.Path.cwd", return_value=cwd),
+                    contextlib.redirect_stdout(output),
+                ):
+                    if scenario == "locked":
+                        with patch("pathlib.Path.rename", side_effect=lock_error):
+                            results = workflow.process_game_dir(game_dir)
+                    else:
+                        results = workflow.process_game_dir(game_dir)
+                self.assertEqual([result], results)
+                self.assertTrue(result.extracted_files[0].is_file())
+                if scenario == "rename":
+                    self.assertEqual(root / "Game", result.game_dir)
+                    self.assertFalse(game_dir.exists())
+                else:
+                    self.assertEqual(game_dir, result.game_dir)
+                    self.assertIn("WARNING: extraction completed", output.getvalue())
+
     def test_chdman_info_detects_dvd_metadata(self) -> None:
         output = "Metadata: Tag='DVD '  Length=..."
         completed = SimpleNamespace(stdout=output, stderr="", returncode=0)

@@ -72,10 +72,30 @@ class ExtractWorkflow:
             desired = dat_folder_name(results[0].dat_name)
             target = game_dir.parent / desired
             if desired and desired != game_dir.name and not target.exists():
-                self._log(f"renaming folder: {game_dir.name} -> {desired}")
-                game_dir.rename(target)
-                for item in results:
-                    item.game_dir = target
+                resolved_dir = game_dir.resolve()
+                cwd = Path.cwd().resolve()
+                if resolved_dir == cwd or resolved_dir in cwd.parents:
+                    print(
+                        f"[extract] WARNING: extraction completed; keeping folder '{game_dir}' "
+                        "because it contains the current working directory. "
+                        f"Rename it to '{desired}' after leaving this folder."
+                    )
+                else:
+                    self._log(f"renaming folder: {game_dir.name} -> {desired}")
+                    try:
+                        game_dir.rename(target)
+                    except OSError as exc:
+                        if getattr(exc, "winerror", None) != 32:
+                            raise
+                        print(
+                            f"[extract] WARNING: extraction completed; keeping folder '{game_dir}' "
+                            f"because it is in use. Rename it to '{desired}' after closing other programs using it."
+                        )
+                    else:
+                        for item in results:
+                            item.game_dir = target
+                            item.extracted_files = [target / path.relative_to(game_dir) for path in item.extracted_files]
+                            item.removed_files = [target / path.relative_to(game_dir) for path in item.removed_files]
         return results
 
     def _extract_one(self, game_dir: Path, chd_file: Path) -> ExtractResult:

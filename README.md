@@ -55,6 +55,7 @@ Safety behavior:
 - `chdman` never overwrites existing outputs unless you pass `--force`.
 - `convert` runs `chdman verify` on each new CHD before deleting the source files; a failed verification keeps the sources and writes no manifest.
 - `extract` only deletes a CHD after the extracted files exist and the manifest is written.
+- If the game folder contains the current working directory or Windows reports it is in use, extraction keeps the folder name and prints a warning. Leave the folder and close programs using it before renaming it manually.
 - A failure in one game directory is reported and the batch continues; the exit code is non-zero if any game failed.
 - `verify --rehash` re-hashes payload files on disk against the manifest in addition to the DAT check.
 - `update` validates each download as a ZIP and keeps the previous archive if the download fails.
