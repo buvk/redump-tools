@@ -15,7 +15,7 @@ CHD and RVZ can be restored to original image formats. Xbox XISO conversion remo
 
 ## Install and start
 
-Requires Python 3.11 or newer. From the project folder on Windows:
+Requires Python 3.11 or newer. The desktop dependency uses Qt 6.8–6.11; Qt 6.12 is excluded after a Python 3.11 shutdown crash in CI. From the project folder on Windows:
 
 ```powershell
 python -m venv .venv

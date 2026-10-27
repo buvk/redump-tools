@@ -12,7 +12,7 @@ redump-tools-ui = "redump_engine.desktop:run"
 
 [project.optional-dependencies]
 dev = ["ruff>=0.5", "pyright>=1.1.370"]
-desktop = ["PySide6-Essentials>=6.8,<7"]
+desktop = ["PySide6-Essentials>=6.8,<6.12"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
