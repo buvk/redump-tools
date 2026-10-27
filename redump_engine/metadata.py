@@ -3,22 +3,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import xml.etree.ElementTree as ET
 import zlib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
-from zipfile import ZipFile
 
-from .filenames import normalize_name, parse_disc_number
+from .dat_loader import load_dat_index as load_dat_index
+from .dat_models import DatEntry as DatEntry
+from .dat_models import DatIndex as DatIndex
+from .dat_models import DatRom as DatRom
+from .file_io import write_metadata
+from .payload_paths import payload_name
+from .systems import recognize_system, system_from_path
 
 PayloadValue = str | int
 PayloadFile = dict[str, PayloadValue]
-
-
-def _empty_dat_roms() -> list[DatRom]:
-    return []
 
 
 def _empty_payload_files() -> list[PayloadFile]:
@@ -29,14 +29,10 @@ def _empty_manifest_discs() -> list[ManifestDisc]:
     return []
 
 
-def _empty_dat_entries_by_checksum() -> dict[str, list[DatEntry]]:
-    return {}
-
-
-def payload_file_from_path(path: Path, kind: str) -> PayloadFile:
+def payload_file_from_path(path: Path, kind: str, *, base: Path | None = None) -> PayloadFile:
     sha1, crc32 = compute_hashes(path)
     return {
-        "name": path.name,
+        "name": payload_name(path, base),
         "sha1": sha1,
         "crc32": crc32,
         "size": path.stat().st_size,
@@ -44,12 +40,12 @@ def payload_file_from_path(path: Path, kind: str) -> PayloadFile:
     }
 
 
-def payload_files_from_paths(paths: Iterable[Path], kind: str) -> list[PayloadFile]:
+def payload_files_from_paths(paths: Iterable[Path], kind: str, *, base: Path | None = None) -> list[PayloadFile]:
     payloads: list[PayloadFile] = []
     for path in paths:
         if not path.exists():
             continue
-        payloads.append(payload_file_from_path(path, kind))
+        payloads.append(payload_file_from_path(path, kind, base=base))
     return payloads
 
 
@@ -130,158 +126,10 @@ def select_dat_entry(
 
 
 @dataclass
-class DatRom:
-    name: str
-    size: int | None = None
-    crc: str | None = None
-    sha1: str | None = None
-
-
-@dataclass
-class DatEntry:
-    name: str
-    roms: list[DatRom] = field(default_factory=_empty_dat_roms)
-
-    @property
-    def expected_format(self) -> str | None:
-        exts = {Path(r.name).suffix.lower() for r in self.roms}
-        if ".iso" in exts:
-            return "iso"
-        if ".cue" in exts or ".bin" in exts:
-            return "bin-cue"
-        return None
-
-    @property
-    def track_count(self) -> int:
-        return sum(1 for r in self.roms if Path(r.name).suffix.lower() == ".bin")
-
-    @property
-    def sha1_set(self) -> set[str]:
-        return {r.sha1.lower() for r in self.roms if r.sha1}
-
-    @property
-    def payload_sha1_set(self) -> set[str]:
-        return {
-            r.sha1.lower()
-            for r in self.roms
-            if r.sha1 and Path(r.name).suffix.lower() != ".cue"
-        }
-
-    @property
-    def payload_crc_set(self) -> set[str]:
-        return {
-            r.crc.lower()
-            for r in self.roms
-            if r.crc and Path(r.name).suffix.lower() != ".cue"
-        }
-
-
-@dataclass
-class DatIndex:
-    entries: list[DatEntry]
-    by_normalized_name: dict[str, list[DatEntry]]
-    by_sha1: dict[str, list[DatEntry]] = field(default_factory=_empty_dat_entries_by_checksum)
-    by_crc32: dict[str, list[DatEntry]] = field(default_factory=_empty_dat_entries_by_checksum)
-
-    @staticmethod
-    def _candidate_base_name(candidate: str) -> str:
-        raw = Path(candidate).name.strip()
-        suffix = Path(raw).suffix.lower()
-        # Only strip known file/image extensions. Keep dots inside plain game titles.
-        known_suffixes = {".chd", ".cue", ".bin", ".iso"}
-        if suffix in known_suffixes:
-            return Path(raw).stem
-        return raw
-
-    def name_matches(self, candidate: str) -> list[DatEntry]:
-        base_name = self._candidate_base_name(candidate)
-        key = normalize_name(base_name)
-        candidate_disc = parse_disc_number(base_name)
-
-        exact_matches = list(self.by_normalized_name.get(key, []))
-        if exact_matches:
-            return self._resolve_disc_candidates(exact_matches, candidate_disc)
-
-        # Disc-aware exact fallback: strip disc token and require exact base match.
-        key_no_disc = re.sub(r"disc\d+", "", key)
-
-        candidates: list[DatEntry] = []
-        for known_key, entries in self.by_normalized_name.items():
-            known_no_disc = re.sub(r"disc\d+", "", known_key)
-            if known_no_disc == key_no_disc:
-                candidates.extend(entries)
-
-        return self._resolve_disc_candidates(candidates, candidate_disc)
-
-    @staticmethod
-    def _resolve_disc_candidates(candidates: list[DatEntry], candidate_disc: int | None) -> list[DatEntry]:
-        if not candidates:
-            return []
-
-        if candidate_disc is not None:
-            disc_specific = [entry for entry in candidates if parse_disc_number(entry.name) == candidate_disc]
-            if disc_specific:
-                return disc_specific
-
-        return candidates
-
-    def match_by_name(self, candidate: str) -> DatEntry | None:
-        candidates = self.name_matches(candidate)
-        if not candidates:
-            return None
-        return candidates[0]
-
-    def checksum_matches(self, sha1s: set[str], crc32s: set[str]) -> list[DatEntry]:
-        if not sha1s and not crc32s:
-            return []
-
-        candidate_scores: dict[int, int] = {}
-        candidate_entries: dict[int, DatEntry] = {}
-        for checksum in sha1s:
-            for entry in self.by_sha1.get(checksum, []):
-                entry_id = id(entry)
-                candidate_scores[entry_id] = candidate_scores.get(entry_id, 0) + 1
-                candidate_entries[entry_id] = entry
-        for checksum in crc32s:
-            for entry in self.by_crc32.get(checksum, []):
-                entry_id = id(entry)
-                candidate_scores[entry_id] = candidate_scores.get(entry_id, 0) + 1
-                candidate_entries[entry_id] = entry
-
-        candidates: list[tuple[int, int, DatEntry]] = []
-        for entry_id, score in candidate_scores.items():
-            entry = candidate_entries[entry_id]
-            entry_sha1 = entry.payload_sha1_set
-            entry_crc = entry.payload_crc_set
-
-            if sha1s and not sha1s.issubset(entry_sha1):
-                continue
-            if crc32s and not crc32s.issubset(entry_crc):
-                continue
-
-            payload_count = len(entry_sha1) or len(entry_crc) or 9999
-            candidates.append((score, -payload_count, entry))
-
-        if not candidates:
-            return []
-
-        # Prefer the strongest checksum overlap, then the closest payload cardinality.
-        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        best_score = candidates[0][0]
-        best_payload_count = candidates[0][1]
-        return [entry for score, payload_count, entry in candidates if score == best_score and payload_count == best_payload_count]
-
-    def match_by_checksums(self, sha1s: set[str], crc32s: set[str]) -> DatEntry | None:
-        candidates = self.checksum_matches(sha1s=sha1s, crc32s=crc32s)
-        if not candidates:
-            return None
-        return candidates[0]
-
-
-@dataclass
 class ManifestDisc:
     disc: int
     payload_files: list[PayloadFile] = field(default_factory=_empty_payload_files)
+    source_files: list[str] = field(default_factory=list)
 
     @property
     def track_count(self) -> int:
@@ -295,6 +143,7 @@ class Manifest:
     set_type: str
     title: str
     disc_entries: list[ManifestDisc] = field(default_factory=_empty_manifest_discs)
+    system: str | None = None
 
     @property
     def dat_name(self) -> str:
@@ -317,6 +166,7 @@ class Manifest:
             {
                 "disc": disc.disc,
                 "payload_files": disc.payload_files,
+                **({"source_files": disc.source_files} if disc.source_files else {}),
             }
             for disc in self.disc_entries
         ]
@@ -325,6 +175,7 @@ class Manifest:
             "set_type": self.set_type,
             "title": self.title,
             "discs": discs,
+            **({"system": self.system} if self.system else {}),
         }
 
 
@@ -355,33 +206,62 @@ def load_manifest(manifest_path: Path) -> Manifest | None:
     if not manifest_path.exists():
         return None
     payload = cast(dict[str, Any], json.loads(manifest_path.read_text(encoding="utf-8")))
+    return manifest_from_dict(payload, manifest_path)
 
-    if "set_type" not in payload or "title" not in payload or "discs" not in payload:
+
+def manifest_from_dict(payload: dict[str, Any], source: Path | None = None) -> Manifest:
+    """Decode an already-read document while callers retain unknown JSON fields."""
+    if not isinstance(payload, dict) or "set_type" not in payload or "title" not in payload or "discs" not in payload:
         raise ValueError(
-            f"unsupported manifest schema in {manifest_path}; expected schema_version/set_type/title/discs"
+            f"unsupported manifest schema in {source or '<data>'}; expected schema_version/set_type/title/discs"
         )
 
-    raw_discs = cast(list[dict[str, Any]], payload.get("discs", []))
+    def invalid(detail: str) -> ValueError:
+        return ValueError(f"Invalid manifest in {source or '<data>'}: {detail}")
+
+    if not isinstance(payload["set_type"], str) or not isinstance(payload["title"], str):
+        raise invalid("set_type and title must be strings")
+    schema_version = payload.get("schema_version", 1)
+    if type(schema_version) is not int or schema_version < 1:
+        raise invalid("schema_version must be a positive integer")
+    raw_discs = payload["discs"]
+    if not isinstance(raw_discs, list):
+        raise invalid("discs must be a list")
     disc_entries: list[ManifestDisc] = []
+    numbers = set()
     for item in raw_discs:
-        payload_files = cast(list[PayloadFile], item.get("payload_files", []))
-        disc_entries.append(
-            ManifestDisc(
-                disc=int(item["disc"]),
-                payload_files=list(payload_files),
-            )
-        )
+        if not isinstance(item, dict):
+            raise invalid("each disc must be an object")
+        value = item.get("disc")
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise invalid("disc number must be a positive integer")
+        try:
+            number = int(value)
+        except ValueError as error:
+            raise invalid("disc number must be a positive integer") from error
+        if number < 1 or number in numbers:
+            raise invalid("disc numbers must be positive and unique")
+        numbers.add(number)
+        files = item.get("payload_files", [])
+        if not isinstance(files, list) or any(not isinstance(record, dict) for record in files):
+            raise invalid("payload_files must be a list of objects")
+        sources = item.get("source_files", [])
+        if not isinstance(sources, list) or any(not isinstance(name, str) for name in sources):
+            raise invalid("source_files must be a list of strings")
+        disc_entries.append(ManifestDisc(number, list(files), list(sources)))
 
     return Manifest(
-        schema_version=int(payload.get("schema_version", 1)),
+        schema_version=schema_version,
         set_type=str(payload.get("set_type", "bin-cue")),
         title=str(payload.get("title", "")),
         disc_entries=disc_entries,
+        system=(recognize_system(payload["system"]) or payload["system"]) if isinstance(payload.get("system"), str) else None,
     )
 
 
 def save_manifest(manifest_path: Path, manifest: Manifest) -> None:
-    manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
+    manifest.system = manifest.system or system_from_path(manifest_path)
+    write_metadata(manifest_path, json.dumps(manifest.to_dict(), indent=2).encode("utf-8"))
 
 
 def match_dat_entry(name: str, dat_index: DatIndex | None) -> DatEntry | None:
@@ -390,10 +270,14 @@ def match_dat_entry(name: str, dat_index: DatIndex | None) -> DatEntry | None:
     return dat_index.match_by_name(name)
 
 
-def match_dat_entries(name: str, dat_index: DatIndex | None) -> list[DatEntry]:
+def match_dat_entries(name: str, dat_index: DatIndex | None, *, system: str | None = None) -> list[DatEntry]:
     if dat_index is None:
         return []
-    return dat_index.name_matches(name)
+    matches = dat_index.name_matches(name)
+    if system is None:
+        return matches
+    scoped = [entry for entry in matches if entry.system == system]
+    return scoped or [entry for entry in matches if entry.system is None]
 
 
 def match_dat_entry_for_files(paths: list[Path], dat_index: DatIndex | None) -> DatEntry | None:
@@ -420,61 +304,3 @@ def match_dat_entries_for_files(paths: list[Path], dat_index: DatIndex | None) -
         sha1s.add(sha1.lower())
         crc32s.add(crc32.lower())
     return dat_index.checksum_matches(sha1s=sha1s, crc32s=crc32s)
-
-
-def _parse_dat_xml(dat_text: str) -> list[DatEntry]:
-    root = ET.fromstring(dat_text)
-    entries: list[DatEntry] = []
-    for game in root.findall(".//game"):
-        name = game.attrib.get("name")
-        if not name:
-            continue
-        roms: list[DatRom] = []
-        for rom in game.findall("rom"):
-            roms.append(
-                DatRom(
-                    name=rom.attrib.get("name", ""),
-                    size=int(rom.attrib["size"]) if "size" in rom.attrib else None,
-                    crc=rom.attrib.get("crc"),
-                    sha1=rom.attrib.get("sha1"),
-                )
-            )
-        entries.append(DatEntry(name=name, roms=roms))
-    return entries
-
-
-def _iter_dat_payloads(dat_dir: Path) -> Iterable[str]:
-    for item in sorted(dat_dir.iterdir(), key=lambda path: path.name.lower()):
-        if item.is_file() and item.suffix.lower() in {".dat", ".xml"}:
-            yield item.read_text(encoding="utf-8", errors="ignore")
-        elif item.is_file() and item.suffix.lower() == ".zip":
-            with ZipFile(item) as archive:
-                for member in sorted(archive.namelist(), key=str.lower):
-                    if member.lower().endswith((".dat", ".xml")):
-                        with archive.open(member) as handle:
-                            yield handle.read().decode("utf-8", errors="ignore")
-
-
-def load_dat_index(dat_dir: Path) -> DatIndex | None:
-    if not dat_dir.exists():
-        return None
-
-    entries: list[DatEntry] = []
-    for payload in _iter_dat_payloads(dat_dir):
-        try:
-            entries.extend(_parse_dat_xml(payload))
-        except ET.ParseError:
-            continue
-
-    by_normalized_name: dict[str, list[DatEntry]] = {}
-    by_sha1: dict[str, list[DatEntry]] = {}
-    by_crc32: dict[str, list[DatEntry]] = {}
-    for entry in entries:
-        key = normalize_name(entry.name)
-        by_normalized_name.setdefault(key, []).append(entry)
-        for checksum in entry.payload_sha1_set:
-            by_sha1.setdefault(checksum, []).append(entry)
-        for checksum in entry.payload_crc_set:
-            by_crc32.setdefault(checksum, []).append(entry)
-
-    return DatIndex(entries=entries, by_normalized_name=by_normalized_name, by_sha1=by_sha1, by_crc32=by_crc32)

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import Request, urlopen
 from zipfile import BadZipFile, ZipFile
+
+from .dat_loader import parse_dat_xml
 
 DOWNLOAD_TIMEOUT_SECONDS = 60
 
@@ -32,6 +36,11 @@ class UpdateResult:
     error: str | None = None
 
 ASSETS: tuple[RedumpAsset, ...] = (
+    RedumpAsset(system="xbox", kind="dat", url="https://redump.info/datfile/XBOX", target_name="redump_xbox_dat.zip"),
+    RedumpAsset(system="gamecube", kind="dat", url="https://redump.info/datfile/GC", target_name="redump_gamecube_dat.zip"),
+    RedumpAsset(system="wii", kind="dat", url="https://redump.info/datfile/WII", target_name="redump_wii_dat.zip"),
+    RedumpAsset(system="dc", kind="dat", url="https://redump.info/datfile/DC", target_name="redump_dc_dat.zip"),
+    RedumpAsset(system="dc", kind="cue", url="https://redump.info/cues/DC", target_name="redump_dc_cuesheets.zip"),
     RedumpAsset(system="psx", kind="dat", url="https://redump.info/datfile/PSX", target_name="redump_psx_dat.zip"),
     RedumpAsset(system="psx", kind="cue", url="https://redump.info/cues/PSX", target_name="redump_psx_cuesheets.zip"),
     RedumpAsset(system="ps2", kind="dat", url="https://redump.info/datfile/PS2", target_name="redump_ps2_dat.zip"),
@@ -81,9 +90,9 @@ def update_assets(
             print(f"[update] {action} {asset.system} {asset.kind}: {asset.url} -> {destination}")
 
         if not dry_run:
-            destination.parent.mkdir(parents=True, exist_ok=True)
             try:
-                _download_to_path(asset.url, destination)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _download_to_path(asset.url, destination, kind=asset.kind, system=asset.system)
             except (OSError, ValueError, BadZipFile) as exc:
                 results.append(
                     UpdateResult(
@@ -110,7 +119,7 @@ def update_assets(
     return results
 
 
-def _download_to_path(url: str, destination: Path) -> None:
+def _download_to_path(url: str, destination: Path, *, kind: str, system: str) -> None:
     request = Request(
         url,
         headers={
@@ -128,11 +137,42 @@ def _download_to_path(url: str, destination: Path) -> None:
         # Never replace a good archive with an HTML error page or truncated download.
         with ZipFile(temp_path) as archive:
             bad_member = archive.testzip()
-        if bad_member is not None:
-            raise BadZipFile(f"corrupt member in downloaded archive: {bad_member}")
+            if bad_member is not None:
+                raise BadZipFile(f"corrupt member in downloaded archive: {bad_member}")
+            _validate_download(archive, kind=kind, system=system)
 
         temp_path.replace(destination)
         temp_path = None
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
+
+
+def _validate_download(archive: ZipFile, *, kind: str, system: str) -> None:
+    suffixes = (".dat", ".xml") if kind == "dat" else (".cue",)
+    members = [member for member in archive.infolist() if not member.is_dir() and member.filename.lower().endswith(suffixes)]
+    if not members:
+        raise ValueError(f"Downloaded archive contains no {kind} files; previous download kept")
+    for member in members:
+        text = archive.read(member).decode("utf-8-sig")
+        if kind == "cue":
+            if not re.search(r'(?im)^\s*(?:FILE|DATAFILE)\s+"[^"]+"', text) or not re.search(r"(?im)^\s*TRACK\s+\d+\s+\S+", text):
+                raise ValueError(f"Invalid downloaded cuesheet: {member.filename}")
+            continue
+        try:
+            entries = parse_dat_xml(text)
+        except (ET.ParseError, ValueError) as error:
+            raise ValueError(f"Invalid downloaded DAT {member.filename}: {error}") from error
+        if not entries:
+            raise ValueError(f"Downloaded DAT contains no game entries: {member.filename}")
+        for entry in entries:
+            if entry.system and entry.system != system:
+                raise ValueError(f"Downloaded DAT identifies {entry.system}, expected {system}: {member.filename}")
+            if not entry.roms:
+                raise ValueError(f"Downloaded DAT game has no ROM records: {entry.name}")
+            for rom in entry.roms:
+                if not rom.name or rom.size is None or rom.size < 0 or not (rom.sha1 or rom.crc):
+                    raise ValueError(f"Incomplete downloaded DAT ROM record: {entry.name} / {rom.name}")
+                if (rom.sha1 is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", rom.sha1)
+                        or rom.crc is not None and not re.fullmatch(r"[0-9a-fA-F]{8}", rom.crc)):
+                    raise ValueError(f"Invalid downloaded DAT checksum: {entry.name} / {rom.name}")

@@ -28,6 +28,10 @@ def _dat_xml(name: str, rom_name: str, payload: bytes) -> str:
     )
 
 
+class WindowsSharingViolation(OSError):
+    winerror = 32
+
+
 class DummyChdman(Chdman):
     def __init__(self) -> None:
         super().__init__(Path("dummy-chdman.exe"), dry_run=True)
@@ -83,8 +87,7 @@ class WorkflowRefactorTests(unittest.TestCase):
                 result = ExtractResult(game_dir, [payload], [], "heuristic", "iso", "Game")
                 workflow = ExtractWorkflow(DummyChdman(), None, CueRepository(root / "cues"))
                 cwd = game_dir if scenario == "cwd" else game_dir / "child" if scenario == "ancestor" else root
-                lock_error = OSError("folder in use")
-                lock_error.winerror = 32
+                lock_error = WindowsSharingViolation("folder in use")
                 output = io.StringIO()
                 with (
                     patch.object(workflow, "_extract_one", return_value=result),
@@ -155,6 +158,14 @@ class WorkflowRefactorTests(unittest.TestCase):
         self.assertEqual("psx", assets[0].system)
         self.assertEqual("cue", assets[0].kind)
 
+    def test_xbox_reference_refresh_includes_dat_without_cues(self) -> None:
+        assets = selected_assets(["xbox"])
+        self.assertEqual(1, len(assets))
+        self.assertEqual("dat", assets[0].kind)
+        self.assertEqual("redump_xbox_dat.zip", assets[0].target_name)
+        self.assertEqual([], selected_assets(["xbox"], include_dats=False))
+        self.assertIn(assets[0], selected_assets())
+
     def test_update_downloads_to_stable_destinations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -162,7 +173,7 @@ class WorkflowRefactorTests(unittest.TestCase):
             cues = root / "cuesheets"
             downloaded: list[Path] = []
 
-            def fake_download(url: str, destination: Path) -> None:
+            def fake_download(url: str, destination: Path, **options) -> None:
                 destination.write_bytes(url.encode("utf-8"))
                 downloaded.append(destination)
 
@@ -188,6 +199,21 @@ class WorkflowRefactorTests(unittest.TestCase):
             )
             for destination in downloaded:
                 self.assertTrue(destination.exists())
+
+    def test_joint_update_keeps_successes_when_one_download_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def download(url: str, destination: Path, **options) -> None:
+                if destination.name.endswith("_dat.zip"):
+                    raise OSError("simulated download failure")
+                destination.write_bytes(b"successful cue archive")
+
+            with patch("redump_engine.updater._download_to_path", side_effect=download):
+                results = update_assets(dats_dir=root / "dats", cuesheets_dir=root / "cues", systems=["dc"])
+            self.assertEqual(len(results), 2)
+            self.assertEqual(sum(bool(result.error) for result in results), 1)
+            self.assertEqual((root / "cues" / "redump_dc_cuesheets.zip").read_bytes(), b"successful cue archive")
 
     def test_extract_heuristic_prefers_iso_for_large_single_track(self) -> None:
         workflow = ExtractWorkflowHarness(chdman=DummyChdman(), dat_index=None, cues=CueRepository(Path(tempfile.gettempdir())))

@@ -25,7 +25,8 @@ class FakeChdman(Chdman):
     """Stands in for chdman by copying bytes; a CHD is just a copy of the ISO."""
 
     def __init__(self, *, verify_ok: bool = True, **kwargs: bool) -> None:
-        super().__init__(Path("fake-chdman"), **kwargs)
+        super().__init__(Path("fake-chdman"), dry_run=kwargs.get("dry_run", False),
+                         force=kwargs.get("force", False), progress=kwargs.get("progress", False))
         self.verify_ok = verify_ok
 
     def createdvd(self, input_image: Path, output_chd: Path) -> str:

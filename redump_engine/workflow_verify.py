@@ -12,6 +12,9 @@ from .metadata import (
     match_dat_entry,
     payload_checksums_from_payload_files,
 )
+from .payload_matching import complete_matches
+from .payload_paths import resolve_payload
+from .systems import system_from_path
 
 
 def _empty_details() -> list[str]:
@@ -43,17 +46,22 @@ class VerifyWorkflow:
         problems: list[str] = []
         for payload in disc.payload_files:
             name = str(payload.get("name", ""))
-            path = game_dir / name
+            try:
+                path = resolve_payload(game_dir, name)
+            except ValueError as error:
+                problems.append(f"disc {disc.disc}: {error}")
+                continue
             if not name or not path.is_file():
                 problems.append(f"disc {disc.disc}: payload file missing on disk: {name or '<unnamed>'}")
                 continue
+            print(f"[verify] Hashing original file: {path}", flush=True)
             sha1, crc32 = compute_hashes(path)
             if sha1 != str(payload.get("sha1", "")).lower() or crc32 != str(payload.get("crc32", "")).lower():
                 problems.append(f"disc {disc.disc}: checksum mismatch on disk: {name}")
         return problems
 
-    def process_game_dir(self, game_dir: Path) -> VerifyResult:
-        manifest_path = game_dir / "manifest.json"
+    def process_game_dir(self, game_dir: Path, manifest_path: Path | None = None) -> VerifyResult:
+        manifest_path = manifest_path or game_dir / "manifest.json"
         manifest = load_manifest(manifest_path)
         if manifest is None:
             return VerifyResult(
@@ -118,7 +126,9 @@ class VerifyWorkflow:
             else:
                 expected_hint = manifest.dat_name
             expected = match_dat_entry(expected_hint, self.dat_index) if expected_hint else None
-            matched = self.dat_index.match_by_checksums(sha1s=sha1s, crc32s=crc32s)
+            candidates = complete_matches(self.dat_index, disc.payload_files, manifest.system or system_from_path(game_dir))
+            unique = {(entry.system, entry.name) for entry in candidates}
+            matched = candidates[0] if len(unique) == 1 else None
 
             self._log(
                 f"game={game_dir.name}, disc={disc.disc}, dat_name={manifest.dat_name or 'none'}, "
@@ -128,7 +138,7 @@ class VerifyWorkflow:
             )
 
             if matched is None:
-                details.append(f"disc {disc.disc}: no DAT entry matched payload checksums")
+                details.append(f"disc {disc.disc}: no unique DAT entry matched the complete payload list (track count, sizes and checksums)")
                 return VerifyResult(
                     game_dir=game_dir,
                     manifest_path=manifest_path,
@@ -166,6 +176,9 @@ class VerifyWorkflow:
                         f"manifest='{manifest.dat_name}' matched_disc='{matched_name}'"
                     )
 
+        if self.rehash:
+            count = sum(len(disc.payload_files) for disc in manifest.disc_entries)
+            details.append(f"Read and rehashed {count} original ISO/BIN files from disk; SHA-1 and CRC32 match the manifest")
         details.append("all manifest discs matched DAT payload checksums")
         details.extend(notes)
         return VerifyResult(

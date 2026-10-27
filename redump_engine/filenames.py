@@ -7,6 +7,28 @@ DISC_PATTERN = re.compile(r"\(disc\s*(\d+)\)", re.IGNORECASE)
 REV_PATTERN = re.compile(r"\(rev[^)]*\)", re.IGNORECASE)
 
 
+def safe_name(name: str) -> str:
+    """Return a valid Windows file component or reject an empty name."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).rstrip(" .")
+    if not name or name in {".", ".."}:
+        raise ValueError("Cannot determine a valid output name")
+    if name.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        name = "_" + name
+    return name
+
+
+def game_key(title: str) -> str:
+    return normalize_name(dat_folder_name(title))
+
+
+def is_xiso(path: Path) -> bool:
+    return path.name.lower().endswith(".xiso.iso") or path.suffix.lower() == ".xiso"
+
+
+def disc_title(path: Path) -> str:
+    return path.name[:-len(".xiso.iso")] if path.name.lower().endswith(".xiso.iso") else path.stem
+
+
 def normalize_name(text: str) -> str:
     lowered = text.lower().strip()
     return re.sub(r"[^a-z0-9]+", "", lowered)

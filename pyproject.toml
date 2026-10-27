@@ -1,21 +1,28 @@
 [project]
 name = "redump-tools-workflow"
 version = "0.1.0"
-description = "Manifest-driven CHD extraction, conversion, verification, and asset update workflows"
+description = "Disc image conversion, verification, and library organization for CHD, RVZ, and Xbox XISO"
 requires-python = ">=3.11"
 
 [project.scripts]
 redump-tools = "redump_engine.cli:run"
 
+[project.gui-scripts]
+redump-tools-ui = "redump_engine.desktop:run"
+
 [project.optional-dependencies]
 dev = ["ruff>=0.5", "pyright>=1.1.370"]
+desktop = ["PySide6-Essentials>=6.8,<7"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["redump_engine"]
+packages = ["redump_engine", "redump_engine.assets"]
+
+[tool.setuptools.package-data]
+"redump_engine.assets" = ["*.ico", "*.png"]
 
 [tool.ruff]
 line-length = 140
@@ -26,6 +33,8 @@ select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501"]
 
 [tool.pyright]
+venvPath = "."
+venv = ".venv"
 include = ["redump_engine", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
