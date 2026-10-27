@@ -15,8 +15,6 @@ jobs:
         python-version: ["3.11", "3.13"]
     env:
       QT_QPA_PLATFORM: offscreen
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,6 +23,12 @@ jobs:
       - name: Install Linux Qt libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libgl1 libxkbcommon0 libdbus-1-3
+      - name: Normalize Windows temporary directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - name: Create virtual environment
         shell: pwsh
         run: |
