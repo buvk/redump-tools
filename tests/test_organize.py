@@ -90,7 +90,8 @@ class OrganizeTests(unittest.TestCase):
 
     def test_cue_tracks_shared_tracks_and_playlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp) / "Collection"
+            root.mkdir()
             cue = root / "Game.cue"
             cue.write_text('FILE "track.bin" BINARY\n TRACK 01 MODE1/2352\n', encoding="utf-8")
             other = root / "Other.cue"

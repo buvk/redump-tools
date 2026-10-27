@@ -231,7 +231,8 @@ class MixedLibraryTests(unittest.TestCase):
 
     def test_selected_cue_cleanup_preserves_bins_used_by_unselected_cue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp)
+            folder = Path(tmp) / "Collection"
+            folder.mkdir()
             track = folder / "shared.bin"
             track.write_bytes(b"shared")
             one, two = folder / "One.cue", folder / "Two.cue"
