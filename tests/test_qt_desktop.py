@@ -474,6 +474,9 @@ class QtDesktopTests(unittest.TestCase):
         from unittest.mock import patch
 
         from redump_engine.dat_models import DatIndex
+        dats = self.root / "dats"
+        dats.mkdir()
+        self.window.settings["dats"] = str(dats)
         paths = []
         for name in ("Bad", "Good"):
             folder = self.root / name
